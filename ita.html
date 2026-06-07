@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<body>
+<input type="file" id="file">
+<script>
+const ctx = new AudioContext();
+
+(async () => {
+  const worklet = `
+  class PDMPlayer extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.data = [];
+    this.pos = 0;
+
+    // PDM の OSR（元 PCM 44.1kHz → PDM 2.8224MHz の場合 64）
+    this.OSR = 64;
+
+    // IIR LPF
+    this.y = 0;
+    this.a = 0.02;
+
+    this.port.onmessage = e => {
+      this.data = e.data;
+      this.pos = 0;
+    };
+  }
+
+  process(_, outputs) {
+    const out = outputs[0][0];
+
+    for (let i = 0; i < out.length; i++) {
+      // PDM の OSR 分だけサンプルを消費
+      let acc = 0;
+      for (let j = 0; j < this.OSR; j++) {
+        if (this.pos >= this.data.length) break;
+        const bit = this.data[this.pos++] ? 1 : -1;
+
+        // IIR LPF
+        this.y = this.y + this.a * (bit - this.y);
+        acc = this.y;
+      }
+
+      out[i] = acc;
+    }
+
+    return true;
+  }
+}
+
+registerProcessor("pdm-player", PDMPlayer);
+
+  `;
+
+  const blob = new Blob([worklet], { type: "application/javascript" });
+  await ctx.audioWorklet.addModule(URL.createObjectURL(blob));
+
+  const node = new AudioWorkletNode(ctx, "pdm-player");
+  node.connect(ctx.destination);
+
+  document.getElementById("file").onchange = async e => {
+    const text = await e.target.files[0].text();
+
+    // "010101..." → Uint8Array(0/1)
+    const arr = new Uint8Array(text.length);
+    for (let i = 0; i < text.length; i++) arr[i] = text[i] === "1" ? 1 : 0;
+
+    node.port.postMessage(arr);
+    ctx.resume();
+  };
+})();
+</script>
+</body>
+</html>
