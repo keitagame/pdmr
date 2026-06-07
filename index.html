@@ -7,49 +7,65 @@ const ctx = new AudioContext();
 
 (async () => {
   const worklet = `
-  class PDMPlayer extends AudioWorkletProcessor {
-    constructor() {
-      super();
-      this.data = [];
+ class PDMPlayer extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.data = [];
+    this.pos = 0;
+
+    this.OSR = 64; // PDM のオーバーサンプリング比
+
+    // CIC 3段
+    this.int1 = 0;
+    this.int2 = 0;
+    this.int3 = 0;
+
+    this.comb1 = 0;
+    this.comb2 = 0;
+    this.comb3 = 0;
+
+    this.port.onmessage = e => {
+      this.data = e.data;
       this.pos = 0;
+    };
+  }
 
-      // PDM の OSR（例：44.1kHz → 2.8224MHz = 64）
-      this.OSR = 64;
+  process(_, outputs) {
+    const out = outputs[0][0];
 
-      // IIR LPF
-      this.y = 0;
-      this.a = 0.02;
+    for (let i = 0; i < out.length; i++) {
 
-      this.port.onmessage = e => {
-        this.data = e.data;
-        this.pos = 0;
-      };
-    }
+      // OSR 分まとめて処理
+      for (let j = 0; j < this.OSR; j++) {
+        if (this.pos >= this.data.length) break;
 
-    process(_, outputs) {
-      const out = outputs[0][0];
+        const bit = this.data[this.pos++] ? 1 : -1;
 
-      for (let i = 0; i < out.length; i++) {
-        let acc = 0;
-
-        // OSR 分の PDM をまとめて 1PCM にする
-        for (let j = 0; j < this.OSR; j++) {
-          if (this.pos >= this.data.length) break;
-
-          const bit = this.data[this.pos++] ? 1 : -1;
-
-          // IIR LPF
-          this.y = this.y + this.a * (bit - this.y);
-          acc = this.y;
-        }
-
-        out[i] = acc;
+        // Integrator (加算だけ)
+        this.int1 += bit;
+        this.int2 += this.int1;
+        this.int3 += this.int2;
       }
 
-      return true;
+      // Comb (差分だけ)
+      const c1 = this.int3 - this.comb1;
+      const c2 = c1 - this.comb2;
+      const c3 = c2 - this.comb3;
+
+      this.comb1 = this.int3;
+      this.comb2 = c1;
+      this.comb3 = c2;
+
+      // 正規化
+      out[i] = c3 / 1000000;
     }
+
+    return true;
   }
-  registerProcessor("pdm-player", PDMPlayer);
+}
+
+registerProcessor("pdm-player", PDMPlayer);
+
   `;
 
   const blob = new Blob([worklet], { type: "application/javascript" });
