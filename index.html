@@ -9,21 +9,18 @@ const ctx = new AudioContext();
 
 (async () => {
 
-const workletCode = `
-
+const worklet = `
 class PDMPlayer extends AudioWorkletProcessor {
 
   constructor() {
     super();
 
-    this.bytes = null;
-
-    this.bytePos = 0;
-    this.bitPos = 0;
+    this.data = null;
+    this.pos = 0;
 
     this.OSR = 64;
 
-    // CIC 3-stage
+    // CIC 3段
     this.int1 = 0;
     this.int2 = 0;
     this.int3 = 0;
@@ -32,11 +29,13 @@ class PDMPlayer extends AudioWorkletProcessor {
     this.comb2 = 0;
     this.comb3 = 0;
 
-    this.port.onmessage = e => {
-      this.bytes = e.data;
+    // 定期リセット用
+    this.counter = 0;
+    this.RESET_INTERVAL = 1 << 24; // 約1677万bit
 
-      this.bytePos = 0;
-      this.bitPos = 0;
+    this.port.onmessage = e => {
+      this.data = e.data;
+      this.pos = 0;
 
       this.int1 = 0;
       this.int2 = 0;
@@ -45,81 +44,63 @@ class PDMPlayer extends AudioWorkletProcessor {
       this.comb1 = 0;
       this.comb2 = 0;
       this.comb3 = 0;
+
+      this.counter = 0;
     };
-  }
-
-  getNextBit() {
-
-    if (!this.bytes) return null;
-
-    if (this.bytePos >= this.bytes.length)
-      return null;
-
-    const byte = this.bytes[this.bytePos];
-
-    const bit =
-      ((byte >> (7 - this.bitPos)) & 1)
-        ? 1
-        : -1;
-
-    this.bitPos++;
-
-    if (this.bitPos === 8) {
-      this.bitPos = 0;
-      this.bytePos++;
-    }
-
-    return bit;
   }
 
   process(inputs, outputs) {
 
     const out = outputs[0][0];
 
-    if (!this.bytes) {
+    if (!this.data) {
       out.fill(0);
       return true;
     }
 
     for (let i = 0; i < out.length; i++) {
 
-      let ended = false;
-
       for (let j = 0; j < this.OSR; j++) {
 
-        const bit = this.getNextBit();
-
-        if (bit === null) {
-          ended = true;
-          break;
+        if (this.pos >= this.data.length) {
+          out[i] = 0;
+          continue;
         }
 
-        // CIC integrators (32bit wrap)
+        const bit = this.data[this.pos++] ? 1 : -1;
 
-        this.int1 = (this.int1 + bit) | 0;
-        this.int2 = (this.int2 + this.int1) | 0;
-        this.int3 = (this.int3 + this.int2) | 0;
+        // CIC Integrator
+        this.int1 += bit;
+        this.int2 += this.int1;
+        this.int3 += this.int2;
+
+        this.counter++;
+
+        // 定期リセット
+        if (this.counter >= this.RESET_INTERVAL) {
+
+          this.int1 = 0;
+          this.int2 = 0;
+          this.int3 = 0;
+
+          this.comb1 = 0;
+          this.comb2 = 0;
+          this.comb3 = 0;
+
+          this.counter = 0;
+        }
       }
 
-      const c1 = (this.int3 - this.comb1) | 0;
-      const c2 = (c1 - this.comb2) | 0;
-      const c3 = (c2 - this.comb3) | 0;
+      // CIC Comb
+      const c1 = this.int3 - this.comb1;
+      const c2 = c1 - this.comb2;
+      const c3 = c2 - this.comb3;
 
       this.comb1 = this.int3;
       this.comb2 = c1;
       this.comb3 = c2;
 
-      out[i] = c3 / 262144;
-
-      if (ended) {
-
-        for (let k = i + 1; k < out.length; k++) {
-          out[k] = 0;
-        }
-
-        this.bytes = null;
-        return true;
-      }
+      out[i] = c3 / 1000000;
     }
 
     return true;
@@ -127,11 +108,10 @@ class PDMPlayer extends AudioWorkletProcessor {
 }
 
 registerProcessor("pdm-player", PDMPlayer);
-
 `;
 
 const blob = new Blob(
-  [workletCode],
+  [worklet],
   { type: "application/javascript" }
 );
 
@@ -144,25 +124,32 @@ const node =
 
 node.connect(ctx.destination);
 
-document
-  .getElementById("file")
-  .addEventListener("change", async e => {
+document.getElementById("file").onchange =
+async e => {
 
-    const file = e.target.files[0];
+  const buf =
+    await e.target.files[0].arrayBuffer();
 
-    const buffer =
-      await file.arrayBuffer();
+  const bytes =
+    new Uint8Array(buf);
 
-    const bytes =
-      new Uint8Array(buffer);
+  // 元コードと同じくビット展開
+  const bits =
+    new Uint8Array(bytes.length * 8);
 
-    node.port.postMessage(
-      bytes,
-      [bytes.buffer]
-    );
+  let p = 0;
 
-    await ctx.resume();
-  });
+  for (let b of bytes) {
+    for (let i = 0; i < 8; i++) {
+      bits[p++] =
+        (b >> (7 - i)) & 1;
+    }
+  }
+
+  node.port.postMessage(bits);
+
+  await ctx.resume();
+};
 
 })();
 </script>
