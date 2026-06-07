@@ -1,21 +1,29 @@
 <!DOCTYPE html>
 <html>
 <body>
+
 <input type="file" id="file">
+
 <script>
 const ctx = new AudioContext();
 
 (async () => {
-  const worklet = `
- class PDMPlayer extends AudioWorkletProcessor {
+
+const workletCode = `
+
+class PDMPlayer extends AudioWorkletProcessor {
+
   constructor() {
     super();
-    this.data = [];
-    this.pos = 0;
 
-    this.OSR = 64; // PDM のオーバーサンプリング比
+    this.bytes = null;
 
-    // CIC 3段
+    this.bytePos = 0;
+    this.bitPos = 0;
+
+    this.OSR = 64;
+
+    // CIC 3-stage
     this.int1 = 0;
     this.int2 = 0;
     this.int3 = 0;
@@ -25,39 +33,93 @@ const ctx = new AudioContext();
     this.comb3 = 0;
 
     this.port.onmessage = e => {
-      this.data = e.data;
-      this.pos = 0;
+      this.bytes = e.data;
+
+      this.bytePos = 0;
+      this.bitPos = 0;
+
+      this.int1 = 0;
+      this.int2 = 0;
+      this.int3 = 0;
+
+      this.comb1 = 0;
+      this.comb2 = 0;
+      this.comb3 = 0;
     };
   }
 
-  process(_, outputs) {
+  getNextBit() {
+
+    if (!this.bytes) return null;
+
+    if (this.bytePos >= this.bytes.length)
+      return null;
+
+    const byte = this.bytes[this.bytePos];
+
+    const bit =
+      ((byte >> (7 - this.bitPos)) & 1)
+        ? 1
+        : -1;
+
+    this.bitPos++;
+
+    if (this.bitPos === 8) {
+      this.bitPos = 0;
+      this.bytePos++;
+    }
+
+    return bit;
+  }
+
+  process(inputs, outputs) {
+
     const out = outputs[0][0];
+
+    if (!this.bytes) {
+      out.fill(0);
+      return true;
+    }
 
     for (let i = 0; i < out.length; i++) {
 
-      // OSR 分まとめて処理
+      let ended = false;
+
       for (let j = 0; j < this.OSR; j++) {
-        if (this.pos >= this.data.length) break;
 
-        const bit = this.data[this.pos++] ? 1 : -1;
+        const bit = this.getNextBit();
 
-        // Integrator (加算だけ)
-        this.int1 += bit;
-        this.int2 += this.int1;
-        this.int3 += this.int2;
+        if (bit === null) {
+          ended = true;
+          break;
+        }
+
+        // CIC integrators (32bit wrap)
+
+        this.int1 = (this.int1 + bit) | 0;
+        this.int2 = (this.int2 + this.int1) | 0;
+        this.int3 = (this.int3 + this.int2) | 0;
       }
 
-      // Comb (差分だけ)
-      const c1 = this.int3 - this.comb1;
-      const c2 = c1 - this.comb2;
-      const c3 = c2 - this.comb3;
+      const c1 = (this.int3 - this.comb1) | 0;
+      const c2 = (c1 - this.comb2) | 0;
+      const c3 = (c2 - this.comb3) | 0;
 
       this.comb1 = this.int3;
       this.comb2 = c1;
       this.comb3 = c2;
 
-      // 正規化
-      out[i] = c3 / 1000000;
+      out[i] = c3 / 262144;
+
+      if (ended) {
+
+        for (let k = i + 1; k < out.length; k++) {
+          out[k] = 0;
+        }
+
+        this.bytes = null;
+        return true;
+      }
     }
 
     return true;
@@ -66,31 +128,44 @@ const ctx = new AudioContext();
 
 registerProcessor("pdm-player", PDMPlayer);
 
-  `;
+`;
 
-  const blob = new Blob([worklet], { type: "application/javascript" });
-  await ctx.audioWorklet.addModule(URL.createObjectURL(blob));
+const blob = new Blob(
+  [workletCode],
+  { type: "application/javascript" }
+);
 
-  const node = new AudioWorkletNode(ctx, "pdm-player");
-  node.connect(ctx.destination);
+await ctx.audioWorklet.addModule(
+  URL.createObjectURL(blob)
+);
 
-  document.getElementById("file").onchange = async e => {
-    const buf = await e.target.files[0].arrayBuffer();
-    const bytes = new Uint8Array(buf);
+const node =
+  new AudioWorkletNode(ctx, "pdm-player");
 
-    // バイト → 1bit 展開
-    const bits = new Uint8Array(bytes.length * 8);
-    let p = 0;
-    for (let b of bytes) {
-      for (let i = 0; i < 8; i++) {
-        bits[p++] = (b >> (7 - i)) & 1;
-      }
-    }
+node.connect(ctx.destination);
 
-    node.port.postMessage(bits);
-    ctx.resume();
-  };
+document
+  .getElementById("file")
+  .addEventListener("change", async e => {
+
+    const file = e.target.files[0];
+
+    const buffer =
+      await file.arrayBuffer();
+
+    const bytes =
+      new Uint8Array(buffer);
+
+    node.port.postMessage(
+      bytes,
+      [bytes.buffer]
+    );
+
+    await ctx.resume();
+  });
+
 })();
 </script>
+
 </body>
 </html>
