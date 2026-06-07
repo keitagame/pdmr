@@ -13,9 +13,12 @@ const ctx = new AudioContext();
       this.data = [];
       this.pos = 0;
 
-      // 簡易 FIR LPF（5tap）
-      this.fir = [0.2, 0.2, 0.2, 0.2, 0.2];
-      this.hist = [0,0,0,0,0];
+      // PDM の OSR（例：44.1kHz → 2.8224MHz = 64）
+      this.OSR = 64;
+
+      // IIR LPF
+      this.y = 0;
+      this.a = 0.02;
 
       this.port.onmessage = e => {
         this.data = e.data;
@@ -27,23 +30,22 @@ const ctx = new AudioContext();
       const out = outputs[0][0];
 
       for (let i = 0; i < out.length; i++) {
-        if (this.pos >= this.data.length) {
-          out[i] = 0;
-          continue;
+        let acc = 0;
+
+        // OSR 分の PDM をまとめて 1PCM にする
+        for (let j = 0; j < this.OSR; j++) {
+          if (this.pos >= this.data.length) break;
+
+          const bit = this.data[this.pos++] ? 1 : -1;
+
+          // IIR LPF
+          this.y = this.y + this.a * (bit - this.y);
+          acc = this.y;
         }
 
-        // 0/1 → -1/+1
-        const bit = this.data[this.pos++] ? 1 : -1;
-
-        // FIR LPF
-        this.hist.pop();
-        this.hist.unshift(bit);
-
-        let y = 0;
-        for (let t = 0; t < 5; t++) y += this.hist[t] * this.fir[t];
-
-        out[i] = y;
+        out[i] = acc;
       }
+
       return true;
     }
   }
@@ -57,13 +59,19 @@ const ctx = new AudioContext();
   node.connect(ctx.destination);
 
   document.getElementById("file").onchange = async e => {
-    const text = await e.target.files[0].text();
+    const buf = await e.target.files[0].arrayBuffer();
+    const bytes = new Uint8Array(buf);
 
-    // "010101..." → Uint8Array(0/1)
-    const arr = new Uint8Array(text.length);
-    for (let i = 0; i < text.length; i++) arr[i] = text[i] === "1" ? 1 : 0;
+    // バイト → 1bit 展開
+    const bits = new Uint8Array(bytes.length * 8);
+    let p = 0;
+    for (let b of bytes) {
+      for (let i = 0; i < 8; i++) {
+        bits[p++] = (b >> (7 - i)) & 1;
+      }
+    }
 
-    node.port.postMessage(arr);
+    node.port.postMessage(bits);
     ctx.resume();
   };
 })();
