@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<body>
+<input type="file" id="file">
+<script>
+const ctx = new AudioContext();
+
+(async () => {
+  const worklet = `
+  class PDMPlayer extends AudioWorkletProcessor {
+    constructor() {
+      super();
+      this.data = [];
+      this.pos = 0;
+
+      // 簡易 FIR LPF（5tap）
+      this.fir = [0.2, 0.2, 0.2, 0.2, 0.2];
+      this.hist = [0,0,0,0,0];
+
+      this.port.onmessage = e => {
+        this.data = e.data;
+        this.pos = 0;
+      };
+    }
+
+    process(_, outputs) {
+      const out = outputs[0][0];
+
+      for (let i = 0; i < out.length; i++) {
+        if (this.pos >= this.data.length) {
+          out[i] = 0;
+          continue;
+        }
+
+        // 0/1 → -1/+1
+        const bit = this.data[this.pos++] ? 1 : -1;
+
+        // FIR LPF
+        this.hist.pop();
+        this.hist.unshift(bit);
+
+        let y = 0;
+        for (let t = 0; t < 5; t++) y += this.hist[t] * this.fir[t];
+
+        out[i] = y;
+      }
+      return true;
+    }
+  }
+  registerProcessor("pdm-player", PDMPlayer);
+  `;
+
+  const blob = new Blob([worklet], { type: "application/javascript" });
+  await ctx.audioWorklet.addModule(URL.createObjectURL(blob));
+
+  const node = new AudioWorkletNode(ctx, "pdm-player");
+  node.connect(ctx.destination);
+
+  document.getElementById("file").onchange = async e => {
+    const text = await e.target.files[0].text();
+
+    // "010101..." → Uint8Array(0/1)
+    const arr = new Uint8Array(text.length);
+    for (let i = 0; i < text.length; i++) arr[i] = text[i] === "1" ? 1 : 0;
+
+    node.port.postMessage(arr);
+    ctx.resume();
+  };
+})();
+</script>
+</body>
+</html>
