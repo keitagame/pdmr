@@ -1,0 +1,186 @@
+<input type="file" id="file" accept=".wav" />
+<button id="save">モノラル16bit数値で保存</button>
+
+<script>
+const fileInput = document.getElementById('file');
+const btn = document.getElementById('save');
+let audioBuffer = null;
+
+// WAV → AudioBuffer
+fileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const arrayBuffer = await file.arrayBuffer();
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+});
+function oversampleLinear(samples, factor) {
+    const out = new Float32Array(samples.length * factor);
+
+    for (let i = 0; i < samples.length - 1; i++) {
+        const a = samples[i];
+        const b = samples[i + 1];
+
+        for (let j = 0; j < factor; j++) {
+            const t = j / factor;
+            out[i * factor + j] = a + (b - a) * t;
+        }
+    }
+
+    out[out.length - 1] = samples[samples.length - 1];
+
+    return out;
+}
+function pcmToPdmOversampled(samples, factor = 64) {
+
+    const pdm = new Uint8Array(samples.length * factor);
+
+    let i1 = 0;
+    let i2 = 0;
+
+    let pos = 0;
+
+    for (let n = 0; n < samples.length - 1; n++) {
+
+        const a = samples[n];
+        const b = samples[n + 1];
+
+        for (let j = 0; j < factor; j++) {
+
+            const t = j / factor;
+
+            const x = a + (b - a) * t;
+
+            const y = i2 >= 0 ? 1 : -1;
+
+            pdm[pos++] = y > 0 ? 1 : 0;
+
+            const e = x - y;
+
+            i1 += e;
+            i2 += i1;
+        }
+    }
+
+    return pdm;
+}
+function packBits(bits) {
+
+    const out = new Uint8Array(Math.ceil(bits.length / 8));
+
+    for (let i = 0; i < bits.length; i++) {
+
+        if (bits[i]) {
+            out[i >> 3] |= 1 << (7 - (i & 7));
+        }
+    }
+
+    return out;
+}
+function pcmToPdmOversampled(samples, factor = 64) {
+
+    const pdm = new Uint8Array(samples.length * factor);
+
+    let i1 = 0;
+    let i2 = 0;
+
+    let pos = 0;
+
+    for (let n = 0; n < samples.length - 1; n++) {
+
+        const a = samples[n];
+        const b = samples[n + 1];
+
+        for (let j = 0; j < factor; j++) {
+
+            const t = j / factor;
+
+            const x = a + (b - a) * t;
+
+            const y = i2 >= 0 ? 1 : -1;
+
+            pdm[pos++] = y > 0 ? 1 : 0;
+
+            const e = x - y;
+
+            i1 += e;
+            i2 += i1;
+        }
+    }
+
+    return pdm;
+}
+function pcmToPdm(samples) {
+    const pdm = new Uint8Array(samples.length);
+
+    let integrator = 0;
+
+    for (let i = 0; i < samples.length; i++) {
+
+        const bit = integrator >= 0 ? 1 : 0;
+
+        pdm[i] = bit;
+
+        const feedback = bit ? 1.0 : -1.0;
+
+        integrator += samples[i] - feedback;
+    }
+
+    return pdm;
+}
+// Float32 → Int16
+function float32ToInt16(float32Array) {
+  const len = float32Array.length;
+  const int16 = new Int16Array(len);
+  for (let i = 0; i < len; i++) {
+    let s = float32Array[i];
+    if (s > 1) s = 1;
+    if (s < -1) s = -1;
+    int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    int16[i] = Math.tanh(int16[i]);
+  }
+  return int16;
+}
+
+// モノラル化（複数ch → 平均）
+function toMono(buffer) {
+  const len = buffer.length;
+  const out = new Float32Array(len);
+
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const data = buffer.getChannelData(ch);
+    for (let i = 0; i < len; i++) {
+      out[i] += data[i];
+    }
+  }
+  for (let i = 0; i < len; i++) {
+    out[i] /= buffer.numberOfChannels;
+  }
+  return out;
+}
+// 保存（モノラル16bitバイナリとして保存）
+btn.addEventListener('click', () => {
+  if (!audioBuffer) return;
+
+  // 1. モノラル化（Float32Array）
+  const mono = toMono(audioBuffer);
+  
+ const pdmBits = pcmToPdmOversampled(mono, 64);
+
+const packed = packBits(pdmBits);
+console.log(packed);
+  // 3. 改善点：Int16ArrayをそのままバイナリとしてBlobに渡す
+  const blob = new Blob([packed.buffer], { type: "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  
+  // 拡張子はRAW形式（ヘッダーなしの生データ）を表す .raw や .pcm が一般的です
+  a.download = "mono_pcm16.raw"; 
+  
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+</script>
