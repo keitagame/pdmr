@@ -31,7 +31,7 @@ class PDMPlayer extends AudioWorkletProcessor {
 
     // 定期リセット用
     this.counter = 0;
-    this.RESET_INTERVAL = 1 << 2; // 約1677万bit
+    this.RESET_INTERVAL = 1 << 10; // 約1677万bit
 
     this.port.onmessage = e => {
       this.data = e.data;
