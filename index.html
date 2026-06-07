@@ -13,16 +13,11 @@ const ctx = new AudioContext();
     this.data = [];
     this.pos = 0;
 
-    this.OSR = 64; // PDM のオーバーサンプリング比
+    this.OSR = 32; // iPhone 用に軽くする
 
-    // CIC 3段
+    // CIC 1段
     this.int1 = 0;
-    this.int2 = 0;
-    this.int3 = 0;
-
     this.comb1 = 0;
-    this.comb2 = 0;
-    this.comb3 = 0;
 
     this.port.onmessage = e => {
       this.data = e.data;
@@ -34,30 +29,16 @@ const ctx = new AudioContext();
     const out = outputs[0][0];
 
     for (let i = 0; i < out.length; i++) {
-
-      // OSR 分まとめて処理
       for (let j = 0; j < this.OSR; j++) {
         if (this.pos >= this.data.length) break;
-
         const bit = this.data[this.pos++] ? 1 : -1;
-
-        // Integrator (加算だけ)
         this.int1 += bit;
-        this.int2 += this.int1;
-        this.int3 += this.int2;
       }
 
-      // Comb (差分だけ)
-      const c1 = this.int3 - this.comb1;
-      const c2 = c1 - this.comb2;
-      const c3 = c2 - this.comb3;
+      const c1 = this.int1 - this.comb1;
+      this.comb1 = this.int1;
 
-      this.comb1 = this.int3;
-      this.comb2 = c1;
-      this.comb3 = c2;
-
-      // 正規化
-      out[i] = c3 / 1000000;
+      out[i] = c1 * 0.00003; // 正規化
     }
 
     return true;
@@ -65,6 +46,7 @@ const ctx = new AudioContext();
 }
 
 registerProcessor("pdm-player", PDMPlayer);
+
 
   `;
 
